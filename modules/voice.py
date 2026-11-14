@@ -122,9 +122,68 @@ class MemberActionView(discord.ui.View):
         self.add_item(MemberActionSelect(action))
 
 
+async def create_room_for(member: discord.Member):
+    guild = member.guild
+    category = guild.get_channel(CATEGORY_ID)
+    if not isinstance(category, discord.CategoryChannel):
+        raise RuntimeError("VOICE_CATEGORY_ID không đúng hoặc không phải danh mục.")
+
+    # Mỗi thành viên chỉ có một phòng riêng; nếu đã có thì chuyển vào phòng cũ.
+    for channel in category.voice_channels:
+        if owner_id_of(channel) == member.id:
+            await member.move_to(channel, reason="Chủ phòng mở lại phòng riêng")
+            return channel, False
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
+        member: discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True,
+            manage_channels=True, move_members=True
+        ),
+    }
+    room = await guild.create_voice_channel(
+        name=f"🔊・{member.display_name}"[:100],
+        category=category,
+        overwrites=overwrites,
+        topic=f"voice-owner:{member.id}",
+        reason="Thành viên bấm nút tạo phòng thoại",
+    )
+    if member.voice and member.voice.channel:
+        await member.move_to(room, reason="Chuyển vào phòng thoại vừa tạo")
+    return room, True
+
+
 class VoiceRoomPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="TẠO PHÒNG VOICE",
+        emoji="➕",
+        style=discord.ButtonStyle.success,
+        custom_id="voice:create_room",
+        row=0,
+    )
+    async def create_room(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            room, created = await create_room_for(interaction.user)
+            if created:
+                await interaction.followup.send(
+                    f"Đã tạo phòng **{room.name}**. Hãy vào kênh thoại để sử dụng nhé.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"Bạn đã có phòng riêng, mình đã chuyển bạn vào **{room.name}**.",
+                    ephemeral=True,
+                )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Bot thiếu quyền Manage Channels hoặc Move Members.", ephemeral=True
+            )
+        except Exception as error:
+            await interaction.followup.send(f"Không tạo được phòng: {error}", ephemeral=True)
 
     async def get_room(self, interaction: discord.Interaction):
         room = owned_room(interaction.user)
@@ -205,30 +264,11 @@ async def ensure_panel():
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if after.channel and after.channel.id == LOBBY_ID:
-        guild = member.guild
-        category = guild.get_channel(CATEGORY_ID)
-        if not isinstance(category, discord.CategoryChannel):
-            print("VOICE_CATEGORY_ID không đúng hoặc không phải danh mục.")
-            return
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
-            member: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True,
-                manage_channels=True, move_members=True
-            ),
-        }
         try:
-            room = await guild.create_voice_channel(
-                name=f"🔊・{member.display_name}"[:100],
-                category=category,
-                overwrites=overwrites,
-                topic=f"voice-owner:{member.id}",
-                reason="Tạo phòng thoại tạm",
-            )
-            await member.move_to(room, reason="Chuyển vào phòng thoại vừa tạo")
+            await create_room_for(member)
         except discord.Forbidden:
             print("Bot thiếu quyền Manage Channels hoặc Move Members.")
-        except discord.HTTPException as error:
+        except Exception as error:
             print(f"Không tạo được phòng: {error}")
 
     if before.channel and isinstance(before.channel, discord.VoiceChannel):
